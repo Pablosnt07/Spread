@@ -6,6 +6,7 @@ export function Nav({ active = "" }: { active?: string }) {
     ["Comparador", "/workspace?tab=comparador"],
     ["Portfolio", "/workspace?tab=portfolio"],
     ["Watchlist", "/workspace?tab=watchlist"],
+    ["Metodología", "/metodologia"],
   ];
 
   return (

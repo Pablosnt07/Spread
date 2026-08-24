@@ -13,6 +13,7 @@ export type InsiderTransaction = {
   transactionValue: number | null;
   securitiesOwned: number | null;
   securityName: string | null;
+  source: string;
   filingUrl: string | null;
 };
 

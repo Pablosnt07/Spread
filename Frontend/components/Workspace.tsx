@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
 import Link from "next/link";
 import { companies, type Company } from "@/lib/data";
-import { PriceChart } from "./PriceChart";
+import { PriceChart, type ChartRange, type ChartSeries, type PricePoint } from "./PriceChart";
 import { RadarChart } from "./RadarChart";
 import { ScoreGauge } from "./ScoreGauge";
 
 type Tab = "portfolio" | "watchlist" | "comparador";
+type InvestorProfile = "Conservador" | "Moderado" | "Crecimiento";
 
 type Holding = Pick<Company, "name" | "ticker" | "sector" | "score"> & {
   invested: number;
@@ -43,14 +44,14 @@ const initialAllocation: AllocationSummary = {
 export function Workspace({ initialTab = "portfolio" }: { initialTab?: string }) {
   const normalized = (["portfolio", "watchlist", "comparador"].includes(initialTab) ? initialTab : "portfolio") as Tab;
   const [tab, setTab] = useState<Tab>(normalized);
-  const [profile, setProfile] = useState("Balanceado");
+  const [profile, setProfile] = useState<InvestorProfile>("Moderado");
   return (
     <main className="workspace-shell">
-      <div className="workspace-title"><div><p>Tu espacio de análisis</p><h1>{tab === "portfolio" ? "Portfolio" : tab === "watchlist" ? "Watchlist" : "Comparador"}</h1></div><div className="profile-switch" aria-label="Perfil de inversión">{["Conservador", "Balanceado", "Crecimiento"].map((item) => <button className={profile === item ? "selected" : ""} onClick={() => setProfile(item)} type="button" key={item}>{item}</button>)}</div></div>
+      <div className="workspace-title"><div><p>Tu espacio de análisis</p><h1>{tab === "portfolio" ? "Portfolio" : tab === "watchlist" ? "Watchlist" : "Comparador"}</h1></div><div className="profile-switch" aria-label="Perfil de inversión">{(["Conservador", "Moderado", "Crecimiento"] as InvestorProfile[]).map((item) => <button className={profile === item ? "selected" : ""} onClick={() => setProfile(item)} type="button" key={item}>{item}</button>)}</div></div>
       <div className="workspace-tabs" role="tablist">{(["portfolio", "watchlist", "comparador"] as Tab[]).map((item) => <button key={item} role="tab" aria-selected={tab === item} onClick={() => setTab(item)}>{item[0].toUpperCase() + item.slice(1)}</button>)}</div>
       {tab === "portfolio" && <Portfolio />}
       {tab === "watchlist" && <Watchlist />}
-      {tab === "comparador" && <Comparator />}
+      {tab === "comparador" && <Comparator profile={profile} />}
     </main>
   );
 }
@@ -69,7 +70,7 @@ function Portfolio() {
     const used = new Set(positions.map((position) => position.ticker));
     return companies.filter((company) => !used.has(company.ticker));
   }, [positions]);
-  const allocations = useMemo(() => {
+  const sectorAllocations = useMemo(() => {
     const totals = new Map<string, number>();
     positions.forEach((position) => totals.set(position.sector, (totals.get(position.sector) ?? 0) + (allocationByTicker.get(position.ticker) ?? 0)));
     return Array.from(totals, ([sector, value], index) => ({
@@ -79,14 +80,41 @@ function Portfolio() {
       color: allocationColors[index % allocationColors.length],
     }));
   }, [positions, allocationByTicker]);
+  const assetAllocations = useMemo(() => positions.map((position, index) => ({
+    ticker: position.ticker,
+    name: position.name,
+    percent: allocationByTicker.get(position.ticker) ?? 0,
+    color: allocationColors[index % allocationColors.length],
+  })), [positions, allocationByTicker]);
   const donutGradient = useMemo(() => {
     let cursor = 0;
-    return allocations.map((allocation) => {
+    return assetAllocations.map((allocation) => {
       const start = cursor;
       cursor += allocation.percent;
       return `${allocation.color} ${start}% ${cursor}%`;
     }).join(", ");
-  }, [allocations]);
+  }, [assetAllocations]);
+
+  const calculateAllocation = async (nextPositions: Holding[]) => {
+    if (nextPositions.length === 0) return { assetCount: 0, totalInvested: 0, positions: [] } satisfies AllocationSummary;
+    const response = await fetch("/api/portfolio-allocation", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseCurrency: "USD", positions: nextPositions.map((position) => ({ ticker: position.ticker, investedAmount: position.invested })) }),
+    });
+    if (!response.ok) throw new Error("Allocation request failed");
+    return await response.json() as AllocationSummary;
+  };
+
+  const removePosition = async (ticker: string) => {
+    const nextPositions = positions.filter((position) => position.ticker !== ticker);
+    setSubmitting(true); setMessage("Recalculando portfolio…");
+    try {
+      const summary = await calculateAllocation(nextPositions);
+      setPositions(nextPositions); setAllocationSummary(summary); setMessage(`${ticker} fue eliminado del portfolio.`);
+    } catch { setMessage("No pudimos actualizar el portfolio. Intentá nuevamente."); }
+    finally { setSubmitting(false); }
+  };
 
   const addPosition = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -109,19 +137,7 @@ function Portfolio() {
     setSubmitting(true);
     setMessage("Calculando nueva asignación…");
     try {
-      const response = await fetch("/api/portfolio-allocation", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          baseCurrency: "USD",
-          positions: [...positions, nextPosition].map((position) => ({
-            ticker: position.ticker,
-            investedAmount: position.invested,
-          })),
-        }),
-      });
-      if (!response.ok) throw new Error("Allocation request failed");
-      const summary = await response.json() as AllocationSummary;
+      const summary = await calculateAllocation([...positions, nextPosition]);
       setPositions((current) => [...current, nextPosition]);
       setAllocationSummary(summary);
       setInvestment("");
@@ -151,17 +167,56 @@ function Portfolio() {
         <p className={message.startsWith("Ingresá") || message.startsWith("No pudimos") ? "negative" : "positive"} role="status">{message || (availableCompanies.length === 0 ? "Todas las empresas disponibles ya están en el portfolio." : "El peso porcentual lo calcula el backend sobre el capital total invertido.")}</p>
       </div>
     </section>
-    <section className="allocation-panel"><div className="panel-heading"><div><span>Asignación</span><strong>Distribución por sector</strong></div><span className="positive">100% invertido</span></div><div className="allocation-content"><div className="donut" style={{ "--allocation-gradient": `conic-gradient(${donutGradient})` } as CSSProperties} role="img" aria-label={`Asignación: ${allocations.map((item) => `${item.sector} ${formatPercent(item.percent)}`).join(", ")}`}><span><strong>100%</strong>asignado</span></div><ul>{allocations.map((allocation) => <li key={allocation.sector}><i style={{ background: allocation.color }} />{allocation.sector}<b>{formatPercent(allocation.percent)}</b></li>)}</ul></div></section>
-    <section className="performance-panel"><div className="panel-heading"><div><span>Rendimiento</span><strong>Portfolio vs. S&amp;P 500</strong></div><span>5 años</span></div><PriceChart compact /></section>
-    <section className="holdings-panel"><div className="panel-heading"><div><span>Posiciones</span><strong>{allocationSummary.assetCount} {allocationSummary.assetCount === 1 ? "activo" : "activos"}</strong></div><button type="button">Exportar CSV</button></div><div className="holdings-table"><div className="holding-row holding-head"><span>Empresa</span><span>Sector</span><span>Invertido</span><span>Peso</span><span>Hoy</span><span>Score</span></div>{positions.map((position) => <div className="holding-row" key={position.ticker}><span><i>{position.ticker[0]}</i><b>{position.name}<small>{position.ticker}</small></b></span><span data-label="Sector">{position.sector}</span><span data-label="Invertido">{formatMoney(position.invested)}</span><span data-label="Peso">{formatPercent(allocationByTicker.get(position.ticker) ?? 0)}</span><span data-label="Hoy" className={position.day.startsWith("+") ? "positive" : "negative"}>{position.day}</span><span data-label="Score"><b>{position.score}</b><small>/100</small></span></div>)}</div></section>
+    <section className="allocation-panel"><div className="panel-heading"><div><span>Asignación</span><strong>Distribución por activo</strong></div><span className="positive">100% invertido</span></div><div className="allocation-content"><div><div className="donut" style={{ "--allocation-gradient": `conic-gradient(${donutGradient})` } as CSSProperties} role="img" aria-label={`Asignación por activo: ${assetAllocations.map((item) => `${item.ticker} ${formatPercent(item.percent)}`).join(", ")}`}><span><strong>{allocationSummary.assetCount}</strong>activos</span></div><div className="asset-legend">{assetAllocations.map((asset) => <span key={asset.ticker}><i style={{ background: asset.color }} />{asset.ticker} <b>{formatPercent(asset.percent)}</b></span>)}</div></div><div className="sector-breakdown"><small>Por sector</small><ul>{sectorAllocations.map((allocation) => <li key={allocation.sector}><i style={{ background: allocation.color }} />{allocation.sector}<b>{formatPercent(allocation.percent)}</b></li>)}</ul></div></div></section>
+    <section className="performance-panel"><div className="panel-heading"><div><span>Rendimiento</span><strong>Portfolio vs. S&amp;P 500</strong></div><span>Base 100</span></div><PortfolioPerformanceChart positions={positions} /></section>
+    <section className="holdings-panel"><div className="panel-heading"><div><span>Posiciones</span><strong>{allocationSummary.assetCount} {allocationSummary.assetCount === 1 ? "activo" : "activos"}</strong></div><button type="button">Exportar CSV</button></div><div className="holdings-table"><div className="holding-row holding-head"><span>Empresa</span><span>Sector</span><span>Invertido</span><span>Peso</span><span>Hoy</span><span>Score</span><span>Acción</span></div>{positions.map((position) => <div className="holding-row" key={position.ticker}><span><i>{position.ticker[0]}</i><b>{position.name}<small>{position.ticker}</small></b></span><span data-label="Sector">{position.sector}</span><span data-label="Invertido">{formatMoney(position.invested)}</span><span data-label="Peso">{formatPercent(allocationByTicker.get(position.ticker) ?? 0)}</span><span data-label="Hoy" className={position.day.startsWith("+") ? "positive" : "negative"}>{position.day}</span><span data-label="Score"><b>{position.score}</b><small>/100</small></span><span data-label="Acción"><button className="remove-position" type="button" disabled={submitting} onClick={() => removePosition(position.ticker)} aria-label={`Eliminar ${position.name}`}>Eliminar</button></span></div>)}</div></section>
   </div>;
 }
 
-function Watchlist() {
-  return <section className="watchlist-panel"><div className="panel-heading"><div><span>Seguimiento</span><strong>Empresas observadas</strong></div><button type="button">+ Agregar empresa</button></div><div className="watchlist-grid">{companies.map((company, index) => <Link href={`/empresa/${company.ticker.toLowerCase()}`} key={company.ticker}><span className="watch-index">0{index + 1}</span><div><strong>{company.name}</strong><span>{company.ticker} · {company.sector}</span></div><div><strong>{company.price}</strong><span className={company.change.startsWith("+") ? "positive" : "negative"}>{company.change}</span></div><div><strong>{company.score}</strong><span>Spread Score</span></div><span aria-hidden="true">→</span></Link>)}</div></section>;
+function PortfolioPerformanceChart({ positions }: { positions: Holding[] }) {
+  const [range, setRange] = useState<ChartRange>("5y");
+  const [series, setSeries] = useState<ChartSeries[]>([]);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  useEffect(() => {
+    if (positions.length === 0) { setSeries([]); setStatus("ready"); return; }
+    const controller = new AbortController();
+    setStatus("loading");
+    const tickers = [...positions.map((position) => position.ticker), "SPY"];
+    Promise.all(tickers.map(async (ticker) => {
+      const response = await fetch(`/api/companies/${ticker}/history?range=${range}`, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error("history-unavailable");
+      const body = await response.json() as { points: PricePoint[] };
+      return [ticker, body.points] as const;
+    })).then((datasets) => {
+      const data = new Map(datasets);
+      const spy = data.get("SPY") ?? [];
+      const commonDates = spy.map((point) => point.date).filter((date) => positions.every((position) => data.get(position.ticker)?.some((point) => point.date === date)));
+      if (commonDates.length < 2) { setSeries([]); setStatus("ready"); return; }
+      const total = positions.reduce((sum, position) => sum + position.invested, 0);
+      const maps = new Map(positions.map((position) => [position.ticker, new Map((data.get(position.ticker) ?? []).map((point) => [point.date, point.price]))]));
+      const bases = new Map(positions.map((position) => [position.ticker, maps.get(position.ticker)!.get(commonDates[0])!]));
+      const portfolioPoints = commonDates.map((date) => ({ date, price: positions.reduce((sum, position) => sum + position.invested / total * (maps.get(position.ticker)!.get(date)! / bases.get(position.ticker)! * 100), 0) }));
+      const spyMap = new Map(spy.map((point) => [point.date, point.price])); const spyBase = spyMap.get(commonDates[0])!;
+      setSeries([{ label: "Tu portfolio", points: portfolioPoints }, { label: "SPY · S&P 500", comparison: true, points: commonDates.map((date) => ({ date, price: spyMap.get(date)! / spyBase * 100 })) }]);
+      setStatus("ready");
+    }).catch((error: unknown) => { if (error instanceof DOMException && error.name === "AbortError") return; setSeries([]); setStatus("error"); });
+    return () => controller.abort();
+  }, [positions, range]);
+
+  return <div className="portfolio-performance">{status === "loading" ? <p className="chart-state" role="status">Calculando ambas curvas con precios reales…</p> : status === "error" ? <p className="chart-state negative" role="alert">No se pudo construir la comparación real.</p> : <PriceChart compact externalSeries={series} externalRange={range} onRangeChange={setRange} subtitle="índice base 100" />}<small>Pesos actuales; no representa las fechas ni el precio real de compra de cada posición.</small></div>;
 }
 
-function Comparator() {
+function Watchlist() {
+  const [watched, setWatched] = useState(companies);
+  const [adding, setAdding] = useState(false);
+  const available = companies.filter((company) => !watched.some((item) => item.ticker === company.ticker));
+  return <section className="watchlist-panel"><div className="panel-heading"><div><span>Seguimiento</span><strong>Empresas observadas</strong></div><button type="button" onClick={() => setAdding((current) => !current)}>{adding ? "Cerrar" : "+ Agregar empresa"}</button></div>
+    {adding ? <div className="watchlist-add">{available.length ? available.map((company) => <button type="button" key={company.ticker} onClick={() => { setWatched((current) => [...current, company]); setAdding(false); }}>+ {company.ticker} · {company.name}</button>) : <span>Todas las empresas disponibles ya están añadidas.</span>}</div> : null}
+    <div className="watchlist-grid">{watched.map((company, index) => <article key={company.ticker}><Link href={`/empresa/${company.ticker.toLowerCase()}`}><span className="watch-index">{String(index + 1).padStart(2, "0")}</span><div><strong>{company.name}</strong><span>{company.ticker} · {company.sector}</span></div><div><strong>{company.price}</strong><span className={company.change.startsWith("+") ? "positive" : "negative"}>{company.change}</span></div><div><strong>{company.score}</strong><span>Spread Score</span></div><span aria-hidden="true">→</span></Link><button className="watch-remove" type="button" onClick={() => setWatched((current) => current.filter((item) => item.ticker !== company.ticker))} aria-label={`Eliminar ${company.name} de la watchlist`}>×</button></article>)}</div>
+  </section>;
+}
+
+function Comparator({ profile }: { profile: InvestorProfile }) {
   const [selected, setSelected] = useState<Company[]>([]);
   const [query, setQuery] = useState("");
   const [focused, setFocused] = useState(false);
@@ -191,7 +246,7 @@ function Comparator() {
 
   const rows: Array<[string, (company: Company) => number, string]> = [
     ["Spread Score", (company) => company.score, ""],
-    ["Profile Match", (company) => company.match, "%"],
+    [`Profile Match · ${profile}`, (company) => company.profileMatches[profile], "%"],
     ["Calidad", (company) => company.metrics.quality, ""],
     ["Crecimiento", (company) => company.metrics.growth, ""],
     ["Rentabilidad", (company) => company.metrics.profitability, ""],

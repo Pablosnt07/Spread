@@ -2,12 +2,18 @@ using Spread.Api.Domain.Assets;
 using Spread.Api.Domain.Activity;
 using Spread.Api.Domain.Companies;
 using Spread.Api.Domain.Financials;
+using Spread.Api.Domain.MarketData;
 using Spread.Api.Domain.Scoring;
 
 namespace Spread.Api.Providers;
 
 public interface IFinancialDataProvider
 {
+    Task<IReadOnlyList<CompanySearchResult>> SearchCompaniesAsync(
+        CompanySearchQuery query,
+        int limit,
+        CancellationToken cancellationToken = default);
+
     Task<CompanyProfile?> GetCompanyProfileAsync(
         AssetIdentifier asset,
         CancellationToken cancellationToken = default);
@@ -18,6 +24,12 @@ public interface IFinancialDataProvider
 
     Task<CompanyMarketActivity?> GetCompanyMarketActivityAsync(
         AssetIdentifier asset,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<HistoricalPricePoint>> GetHistoricalPricesAsync(
+        AssetIdentifier asset,
+        DateOnly startDate,
+        DateOnly endDate,
         CancellationToken cancellationToken = default);
 }
 

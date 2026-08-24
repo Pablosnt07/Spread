@@ -4,6 +4,8 @@ using System.Text;
 using Spread.Api.Domain.Assets;
 using Spread.Api.Domain.Activity;
 using Spread.Api.Domain.Financials;
+using Spread.Api.Domain.Companies;
+using Spread.Api.Domain.MarketData;
 using Spread.Api.Providers;
 using Spread.Api.Providers.Fmp;
 
@@ -11,6 +13,84 @@ namespace Spread.Tests.Providers;
 
 public sealed class FmpFinancialDataProviderTests
 {
+    [Fact]
+    public async Task GetHistoricalPricesAsync_MapsSortsAndBoundsRequest()
+    {
+        const string json = """
+            [
+              {"symbol":"AAPL","date":"2026-08-22","price":231.5},
+              {"symbol":"AAPL","date":"2026-08-21","price":229.2}
+            ]
+            """;
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+
+        var result = await provider.GetHistoricalPricesAsync(
+            new AssetIdentifier("AAPL"),
+            new DateOnly(2026, 1, 1),
+            new DateOnly(2026, 8, 24));
+
+        Assert.Equal(2, result.Count);
+        Assert.Equal(new DateOnly(2026, 8, 21), result[0].Date);
+        Assert.Equal(229.2m, result[0].Price);
+        Assert.Equal("/stable/historical-price-eod/light", handler.RequestUri!.AbsolutePath);
+        Assert.Equal("AAPL", GetQueryValue(handler.RequestUri, "symbol"));
+        Assert.Equal("2026-01-01", GetQueryValue(handler.RequestUri, "from"));
+        Assert.Equal("2026-08-24", GetQueryValue(handler.RequestUri, "to"));
+        Assert.Null(GetQueryValue(handler.RequestUri, "apikey"));
+        Assert.Equal("test-key", handler.ApiKeyHeader);
+    }
+
+    [Fact]
+    public async Task GetHistoricalPricesAsync_RejectsInvalidProviderValues()
+    {
+        const string json = """[{"symbol":"AAPL","date":"2026-08-22","price":-1}]""";
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+
+        var exception = await Assert.ThrowsAsync<FinancialDataProviderException>(() =>
+            provider.GetHistoricalPricesAsync(new AssetIdentifier("AAPL"), new DateOnly(2026, 1, 1), new DateOnly(2026, 8, 24)));
+
+        Assert.Equal(FinancialDataProviderFailure.InvalidResponse, exception.Failure);
+    }
+    [Fact]
+    public async Task SearchCompaniesAsync_MapsAndBoundsProviderResults()
+    {
+        const string json = """
+            [
+              {"symbol":"NOW","name":"ServiceNow, Inc.","exchangeShortName":"NYSE","currency":"USD"},
+              {"symbol":"NOW","name":"Duplicate","exchangeShortName":"NYSE","currency":"USD"},
+              {"symbol":"BAD<script>","name":"Unsafe"},
+              {"symbol":"NOW2","name":"Second result","exchangeShortName":"NYSE","currency":"USD"}
+            ]
+            """;
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+        Assert.True(CompanySearchQuery.TryCreate("ServiceNow", out var query));
+
+        var results = await provider.SearchCompaniesAsync(query!, 2);
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal("NOW", results[0].Ticker);
+        Assert.Equal("ServiceNow, Inc.", results[0].CompanyName);
+        Assert.EndsWith("/search-name", handler.RequestUri!.AbsolutePath, StringComparison.Ordinal);
+        Assert.Equal("ServiceNow", GetQueryValue(handler.RequestUri, "query"));
+        Assert.Null(GetQueryValue(handler.RequestUri, "apikey"));
+        Assert.Equal("test-key", handler.ApiKeyHeader);
+    }
+
     [Fact]
     public async Task GetCompanyProfileAsync_MapsExternalDtoWithoutExposingProviderShape()
     {
@@ -81,6 +161,34 @@ public sealed class FmpFinancialDataProviderTests
     }
 
     [Fact]
+    public async Task GetCompanyProfileAsync_ClassifiesExchangeTradedFund()
+    {
+        const string json = """
+            [{
+              "symbol": "QQQ",
+              "companyName": "Invesco QQQ Trust, Series 1",
+              "sector": "Financial Services",
+              "industry": "Asset Management",
+              "isEtf": true,
+              "isFund": true,
+              "isActivelyTrading": true
+            }]
+            """;
+
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+
+        var result = await provider.GetCompanyProfileAsync(new AssetIdentifier("QQQ"));
+
+        Assert.NotNull(result);
+        Assert.Equal(AssetType.ExchangeTradedFund, result.AssetType);
+    }
+
+    [Fact]
     public async Task GetCompanyProfileAsync_MapsRateLimitWithoutLeakingResponseBody()
     {
         var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.TooManyRequests));
@@ -114,6 +222,23 @@ public sealed class FmpFinancialDataProviderTests
     public async Task GetCompanyProfileAsync_DropsUnsafeLogoUrl()
     {
         const string json = """[{"symbol":"AAPL","companyName":"Apple Inc.","image":"javascript:alert(1)"}]""";
+        var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        });
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+
+        var result = await provider.GetCompanyProfileAsync(new AssetIdentifier("AAPL"));
+
+        Assert.NotNull(result);
+        Assert.Null(result.LogoUrl);
+    }
+
+    [Fact]
+    public async Task GetCompanyProfileAsync_DropsLogoFromUntrustedHttpsHost()
+    {
+        const string json = """[{"symbol":"AAPL","companyName":"Apple Inc.","image":"https://attacker.example/tracker.png"}]""";
         var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -276,6 +401,27 @@ public sealed class FmpFinancialDataProviderTests
         Assert.True(result.InsiderDataAvailable);
         Assert.False(result.DividendDataAvailable);
         Assert.Single(result.InsiderTransactions);
+        Assert.Empty(result.Dividends);
+    }
+
+    [Fact]
+    public async Task GetCompanyMarketActivityAsync_TreatsSuccessfulEmptyDatasetsAsAvailable()
+    {
+        var responses = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["/stable/insider-trading/latest"] = "[]",
+            ["/stable/dividends"] = "[]"
+        };
+        var handler = new RoutingHandler(responses);
+        using var httpClient = CreateHttpClient(handler);
+        var provider = new FmpFinancialDataProvider(httpClient);
+
+        var result = await provider.GetCompanyMarketActivityAsync(new AssetIdentifier("MELI"));
+
+        Assert.NotNull(result);
+        Assert.True(result.InsiderDataAvailable);
+        Assert.True(result.DividendDataAvailable);
+        Assert.Empty(result.InsiderTransactions);
         Assert.Empty(result.Dividends);
     }
 

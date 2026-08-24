@@ -5,6 +5,7 @@ using Spread.Api.Domain.Activity;
 using Spread.Api.Domain.Assets;
 using Spread.Api.Domain.Companies;
 using Spread.Api.Domain.Financials;
+using Spread.Api.Domain.MarketData;
 
 namespace Spread.Api.Providers.Fmp;
 
@@ -15,6 +16,88 @@ public sealed class FmpFinancialDataProvider(HttpClient httpClient) : IFinancial
     private const int InsiderRequestLimit = 100;
     private const int InsiderOutputLimit = 12;
     private const int DividendOutputLimit = 8;
+    private const int HistoricalOutputLimit = 320;
+
+    public async Task<IReadOnlyList<HistoricalPricePoint>> GetHistoricalPricesAsync(
+        AssetIdentifier asset,
+        DateOnly startDate,
+        DateOnly endDate,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(asset);
+        if (startDate > endDate || startDate < endDate.AddYears(-25))
+        {
+            throw new ArgumentOutOfRangeException(nameof(startDate));
+        }
+
+        var rows = await GetArrayAsync<FmpHistoricalPriceDto>(
+            $"historical-price-eod/light?symbol={Uri.EscapeDataString(asset.Ticker)}&from={startDate:yyyy-MM-dd}&to={endDate:yyyy-MM-dd}",
+            cancellationToken);
+
+        var points = new List<HistoricalPricePoint>(rows.Length);
+        foreach (var row in rows)
+        {
+            if (row.Symbol is not null)
+            {
+                ValidateSymbol(row.Symbol, asset, "A historical price");
+            }
+
+            if (!row.Date.HasValue || !row.Price.HasValue || row.Price <= 0 || row.Date < startDate || row.Date > endDate)
+            {
+                throw InvalidResponse("A historical price returned invalid values.");
+            }
+
+            points.Add(new HistoricalPricePoint(row.Date.Value, row.Price.Value));
+        }
+
+        var ordered = points
+            .DistinctBy(point => point.Date)
+            .OrderBy(point => point.Date)
+            .ToArray();
+        if (ordered.Length <= HistoricalOutputLimit)
+        {
+            return ordered;
+        }
+
+        var step = (double)(ordered.Length - 1) / (HistoricalOutputLimit - 1);
+        return [.. Enumerable.Range(0, HistoricalOutputLimit)
+            .Select(index => ordered[(int)Math.Round(index * step)])
+            .DistinctBy(point => point.Date)];
+    }
+
+    public async Task<IReadOnlyList<CompanySearchResult>> SearchCompaniesAsync(
+        CompanySearchQuery query,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        if (limit is < 1 or > 8)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+
+        var tickerQuery = AssetIdentifier.TryCreate(query.Value, out _)
+            && query.Value.All(character => !char.IsLetter(character) || char.IsUpper(character));
+        var endpoint = tickerQuery
+            ? "search-symbol"
+            : "search-name";
+        var rows = await GetArrayAsync<FmpSearchResultDto>(
+            $"{endpoint}?query={Uri.EscapeDataString(query.Value)}",
+            cancellationToken);
+        if (!tickerQuery && rows.Length == 0)
+        {
+            rows = await GetArrayAsync<FmpSearchResultDto>(
+                $"search-symbol?query={Uri.EscapeDataString(query.Value)}",
+                cancellationToken);
+        }
+
+        return [.. rows
+            .Select(MapSearchResult)
+            .Where(result => result is not null)
+            .Cast<CompanySearchResult>()
+            .DistinctBy(result => result.Ticker, StringComparer.Ordinal)
+            .Take(limit)];
+    }
 
     public async Task<CompanyProfile?> GetCompanyProfileAsync(
         AssetIdentifier asset,
@@ -89,7 +172,7 @@ public sealed class FmpFinancialDataProvider(HttpClient httpClient) : IFinancial
                 profile.Beta,
                 profile.IsActivelyTrading,
                 NormalizeOptional(profile.Website),
-                NormalizeProviderUrl(profile.Image),
+                NormalizeLogoUrl(profile.Image),
                 DateTimeOffset.UtcNow,
                 "FMP");
         }
@@ -243,12 +326,6 @@ public sealed class FmpFinancialDataProvider(HttpClient httpClient) : IFinancial
             .Take(DividendOutputLimit)
             .ToArray();
 
-        if (insiders.Length == 0 && dividends.Length == 0
-            && insiderDataset.Failure is null && dividendDataset.Failure is null)
-        {
-            return null;
-        }
-
         return new CompanyMarketActivity(
             asset.Ticker,
             insiders,
@@ -377,6 +454,7 @@ public sealed class FmpFinancialDataProvider(HttpClient httpClient) : IFinancial
             transactionValue,
             row.SecuritiesOwned,
             NormalizeOptional(row.SecurityName),
+            "FMP",
             NormalizeProviderUrl(row.Url ?? row.Link));
     }
 
@@ -475,6 +553,48 @@ public sealed class FmpFinancialDataProvider(HttpClient httpClient) : IFinancial
                 || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
                 ? uri.AbsoluteUri
                 : null;
+    }
+
+    private static string? NormalizeLogoUrl(string? value)
+    {
+        var normalized = NormalizeOptional(value);
+        if (normalized is null || !Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        return string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(uri.Host, "images.financialmodelingprep.com", StringComparison.OrdinalIgnoreCase)
+                ? uri.AbsoluteUri
+                : null;
+    }
+
+    private static CompanySearchResult? MapSearchResult(FmpSearchResultDto row)
+    {
+        if (!AssetIdentifier.TryCreate(row.Symbol, out var asset)
+            || string.IsNullOrWhiteSpace(row.Name))
+        {
+            return null;
+        }
+
+        var name = row.Name.Trim();
+        if (name.Length > 160)
+        {
+            return null;
+        }
+
+        return new CompanySearchResult(
+            asset!.Ticker,
+            name,
+            LimitOptional(row.ExchangeShortName ?? row.Exchange ?? row.StockExchange, 80),
+            LimitOptional(row.Currency, 12),
+            "FMP");
+    }
+
+    private static string? LimitOptional(string? value, int maximumLength)
+    {
+        var normalized = NormalizeOptional(value);
+        return normalized is not null && normalized.Length <= maximumLength ? normalized : null;
     }
 
     private static Dictionary<FinancialPeriodKey, TStatement> IndexStatements<TStatement>(

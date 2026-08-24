@@ -9,7 +9,7 @@ Backend foundation for **spread**, an educational stock fundamental analyzer. It
 - Live FMP company-profile integration, including validated company logos, through a normalized Spread contract.
 - `GET /api/companies/{ticker}` with validation, rate limiting, and 24-hour cache.
 - `GET /api/companies/{ticker}/financials` with five annual periods, strict normalization, and 12-hour cache.
-- `GET /api/companies/{ticker}/activity` with bounded latest-insider evidence and dividend history.
+- `GET /api/companies/{ticker}/activity` with optional company-specific Alpha Vantage insider history, FMP fallback, and dividend history.
 - Pure 0–100 scoring primitives for six dimensions.
 - Missing-dimension weight redistribution and confidence gating.
 - Provider and immutable score-run persistence boundaries.
@@ -17,7 +17,7 @@ Backend foundation for **spread**, an educational stock fundamental analyzer. It
 - Next.js interface with Mercado, company analysis, Portfolio, Watchlist, and Comparator views, including real FMP annual income, dividend, insider, and company-profile sections.
 - Stateless portfolio allocation preview with unique asset count, total invested capital, and deterministic percentages.
 
-No database, authentication, or OpenAI integration is enabled yet. FMP currently supplies normalized company profiles, annual financial statements, dividends, and a bounded latest-insider feed.
+No database, authentication, or OpenAI integration is enabled yet. FMP supplies normalized company profiles, annual financial statements, dividends, and bounded insider fallback data. Alpha Vantage can optionally supply company-specific insider history.
 
 ## Run locally
 
@@ -42,7 +42,7 @@ npm run dev
 
 Then open `http://localhost:3000`. Company identity, annual income, dividends, and insider evidence use normalized FMP data; price history and the remaining unfinished analysis slices still use demonstration data.
 
-Real provider keys must never be committed. Development uses the user-secret key `FinancialData:Fmp:ApiKey`; hosting uses `FinancialData__Fmp__ApiKey`. `.env.example` contains names only.
+Real provider keys must never be committed. Development uses the user-secret keys `FinancialData:Fmp:ApiKey` and `FinancialData:AlphaVantage:ApiKey`; hosting uses their double-underscore environment-variable equivalents. `.env.example` contains names only.
 
 ## Repository map
 

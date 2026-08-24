@@ -22,6 +22,7 @@ public sealed record InsiderTransaction(
     decimal? TransactionValue,
     decimal? SecuritiesOwned,
     string? SecurityName,
+    string Source,
     string? FilingUrl);
 
 public enum InsiderTransactionCategory

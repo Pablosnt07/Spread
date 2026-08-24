@@ -2,7 +2,9 @@ using Spread.Api.Domain.Assets;
 using Spread.Api.Domain.Activity;
 using Spread.Api.Domain.Companies;
 using Spread.Api.Domain.Financials;
+using Spread.Api.Domain.MarketData;
 using Spread.Api.Services;
+using Spread.Api.Infrastructure.Observability;
 
 namespace Spread.Api.Features.Companies;
 
@@ -10,6 +12,41 @@ public static class CompanyEndpoints
 {
     public static IEndpointRouteBuilder MapCompanyEndpoints(this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapGet("/api/companies/search", async (
+            string? q,
+            int? limit,
+            HttpContext httpContext,
+            ICompanyService companyService,
+            CancellationToken cancellationToken) =>
+        {
+            if (!CompanySearchQuery.TryCreate(q, out var query))
+            {
+                CompanySearchMetrics.RecordRejection("invalid_query");
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid company search",
+                    detail: "Search must contain 2 to 64 letters, numbers, spaces, dots, hyphens, apostrophes, or ampersands.",
+                    type: "https://spread.local/problems/invalid-company-search");
+            }
+
+            var resultLimit = limit ?? 6;
+            if (resultLimit is < 1 or > 8)
+            {
+                CompanySearchMetrics.RecordRejection("invalid_limit");
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid result limit",
+                    detail: "Search result limit must be between 1 and 8.",
+                    type: "https://spread.local/problems/invalid-search-limit");
+            }
+
+            var results = await companyService.SearchAsync(query!, resultLimit, cancellationToken);
+            httpContext.Response.Headers.CacheControl = "public, max-age=60";
+            return Results.Ok(results.Select(CompanySearchResponse.FromDomain));
+        })
+        .RequireRateLimiting("company-search")
+        .WithName("SearchCompanies");
+
         endpoints.MapGet("/api/companies/{ticker}", async (
             string ticker,
             ICompanyService companyService,
@@ -80,6 +117,43 @@ public static class CompanyEndpoints
         .RequireRateLimiting("provider-read")
         .WithName("GetCompanyMarketActivity");
 
+        endpoints.MapGet("/api/companies/{ticker}/history", async (
+            string ticker,
+            string? range,
+            HttpContext httpContext,
+            ICompanyService companyService,
+            CancellationToken cancellationToken) =>
+        {
+            if (!AssetIdentifier.TryCreate(ticker, out var asset))
+            {
+                return InvalidTicker();
+            }
+
+            if (!TryParseRange(range, out var parsedRange))
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status400BadRequest,
+                    title: "Invalid historical range",
+                    detail: "Range must be one of: ytd, 1y, 3y, 5y, max.",
+                    type: "https://spread.local/problems/invalid-historical-range");
+            }
+
+            var history = await companyService.GetPriceHistoryAsync(asset!, parsedRange, cancellationToken);
+            if (history is null)
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status404NotFound,
+                    title: "Price history not found",
+                    detail: "No historical prices were found for the requested ticker and range.",
+                    type: "https://spread.local/problems/price-history-not-found");
+            }
+
+            httpContext.Response.Headers.CacheControl = "public, max-age=300, stale-while-revalidate=3600";
+            return Results.Ok(HistoricalPriceResponse.FromDomain(history));
+        })
+        .RequireRateLimiting("provider-read")
+        .WithName("GetCompanyPriceHistory");
+
         return endpoints;
     }
 
@@ -89,6 +163,44 @@ public static class CompanyEndpoints
             title: "Invalid ticker",
             detail: "Ticker must contain 1 to 12 letters, numbers, dots, or hyphens.",
             type: "https://spread.local/problems/invalid-ticker");
+
+    private static bool TryParseRange(string? value, out HistoricalPriceRange range)
+    {
+        range = value?.Trim().ToLowerInvariant() switch
+        {
+            null or "" or "5y" => HistoricalPriceRange.FiveYears,
+            "ytd" => HistoricalPriceRange.YearToDate,
+            "1y" => HistoricalPriceRange.OneYear,
+            "3y" => HistoricalPriceRange.ThreeYears,
+            "max" => HistoricalPriceRange.Maximum,
+            _ => (HistoricalPriceRange)(-1)
+        };
+        return range >= HistoricalPriceRange.YearToDate;
+    }
+}
+
+public sealed record HistoricalPriceResponse(
+    string Ticker,
+    string Range,
+    IReadOnlyList<HistoricalPricePointResponse> Points,
+    DateTimeOffset FetchedAt,
+    string Provider)
+{
+    public static HistoricalPriceResponse FromDomain(HistoricalPriceSeries series)
+        => new(series.Ticker, series.Range.ToString(), [.. series.Points.Select(point => new HistoricalPricePointResponse(point.Date, point.Price))], series.FetchedAt, series.Provider);
+}
+
+public sealed record HistoricalPricePointResponse(DateOnly Date, decimal Price);
+
+public sealed record CompanySearchResponse(
+    string Ticker,
+    string CompanyName,
+    string? Exchange,
+    string? Currency,
+    string Provider)
+{
+    public static CompanySearchResponse FromDomain(CompanySearchResult result)
+        => new(result.Ticker, result.CompanyName, result.Exchange, result.Currency, result.Provider);
 }
 
 public sealed record CompanyMarketActivityResponse(
@@ -124,6 +236,7 @@ public sealed record InsiderTransactionResponse(
     decimal? TransactionValue,
     decimal? SecuritiesOwned,
     string? SecurityName,
+    string Source,
     string? FilingUrl)
 {
     public static InsiderTransactionResponse FromDomain(InsiderTransaction transaction)
@@ -140,6 +253,7 @@ public sealed record InsiderTransactionResponse(
             transaction.TransactionValue,
             transaction.SecuritiesOwned,
             transaction.SecurityName,
+            transaction.Source,
             transaction.FilingUrl);
 }
 

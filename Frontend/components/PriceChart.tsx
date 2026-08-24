@@ -1,27 +1,61 @@
-const points = [185,181,188,193,191,199,204,201,209,212,218,214,205,198,202,211,216,220,226,221,229,234,231,238,242,237,244,248,252,247,239,244,251,256,263,259,267,272,269,278,283,280,287,291,296,289,294,301,306,311,307,315,319,316,323,330];
+"use client";
 
-function pathFor(values: number[], width = 760, height = 250) {
-  const min = Math.min(...values) - 10;
-  const max = Math.max(...values) + 10;
-  return values.map((value, index) => {
-    const x = (index / (values.length - 1)) * width;
-    const y = height - ((value - min) / (max - min)) * height;
-    return `${index === 0 ? "M" : "L"}${x.toFixed(1)} ${y.toFixed(1)}`;
-  }).join(" ");
+import { useEffect, useMemo, useState } from "react";
+
+export type ChartRange = "ytd" | "1y" | "3y" | "5y" | "max";
+export type PricePoint = { date: string; price: number };
+export type ChartSeries = { label: string; points: PricePoint[]; comparison?: boolean };
+const ranges: Array<[ChartRange, string]> = [["ytd", "YTD"], ["1y", "1A"], ["3y", "3A"], ["5y", "5A"], ["max", "Máx."]];
+
+function pathFor(values: number[], height: number, min: number, max: number) {
+  const spread = max - min || 1;
+  return values.map((value, index) => `${index === 0 ? "M" : "L"}${(index / Math.max(values.length - 1, 1) * 760).toFixed(1)} ${(height - (value - min) / spread * height).toFixed(1)}`).join(" ");
 }
 
-export function PriceChart({ compact = false }: { compact?: boolean }) {
-  const path = pathFor(points, 760, compact ? 170 : 250);
-  return (
-    <figure className={`price-chart ${compact ? "chart-compact" : ""}`}>
-      <div className="chart-title"><span>Precio histórico <small>USD · Ajustado</small></span><div><button type="button">1A</button><button type="button">3A</button><button className="selected" type="button">5A</button><button type="button">Máx.</button></div></div>
-      <svg viewBox={`0 0 760 ${compact ? 190 : 280}`} preserveAspectRatio="none" role="img" aria-label="Precio histórico de Apple durante cinco años, tendencia general ascendente con períodos de volatilidad">
-        {[0, 1, 2, 3, 4].map((line) => <line className="chart-guide" key={line} x1="0" x2="760" y1={30 + line * 52} y2={30 + line * 52} />)}
-        <path className="chart-area" d={`${path} L760 ${compact ? 170 : 250} L0 ${compact ? 170 : 250} Z`} />
-        <path className="chart-line" d={path} />
-        <circle className="chart-point" cx="760" cy={compact ? 16 : 18} r="4" />
-      </svg>
-      <div className="chart-axis" aria-hidden="true"><span>2021</span><span>2022</span><span>2023</span><span>2024</span><span>2025</span><span>Hoy</span></div>
-    </figure>
-  );
+export function PriceChart({ ticker, compact = false, externalSeries, externalRange, onRangeChange, subtitle = "USD · cierre diario" }: {
+  ticker?: string; compact?: boolean; externalSeries?: ChartSeries[]; externalRange?: ChartRange; onRangeChange?: (range: ChartRange) => void; subtitle?: string;
+}) {
+  const [localRange, setLocalRange] = useState<ChartRange>("5y");
+  const [points, setPoints] = useState<PricePoint[]>([]);
+  const [status, setStatus] = useState<"loading" | "ready" | "empty" | "error">(ticker ? "loading" : "empty");
+  const range = externalRange ?? localRange;
+  const series = externalSeries ?? (ticker ? [{ label: ticker, points }] : []);
+
+  useEffect(() => {
+    if (!ticker || externalSeries) return;
+    const controller = new AbortController();
+    setStatus("loading");
+    fetch(`/api/companies/${encodeURIComponent(ticker)}/history?range=${range}`, { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("history-unavailable");
+        const body = await response.json() as { points?: PricePoint[] };
+        const next = Array.isArray(body.points) ? body.points.filter((point) => Number.isFinite(point.price)) : [];
+        setPoints(next); setStatus(next.length > 1 ? "ready" : "empty");
+      })
+      .catch((error: unknown) => { if (error instanceof DOMException && error.name === "AbortError") return; setStatus("error"); setPoints([]); });
+    return () => controller.abort();
+  }, [externalSeries, range, ticker]);
+
+  const geometry = useMemo(() => {
+    const all = series.flatMap((item) => item.points.map((point) => point.price));
+    if (all.length < 2) return null;
+    const rawMin = Math.min(...all); const rawMax = Math.max(...all);
+    const padding = Math.max((rawMax - rawMin) * 0.08, rawMax * 0.01); const height = compact ? 170 : 250;
+    return { height, paths: series.map((item) => ({ ...item, path: pathFor(item.points.map((point) => point.price), height, rawMin - padding, rawMax + padding) })) };
+  }, [compact, series]);
+  const updateRange = (next: ChartRange) => { setLocalRange(next); onRangeChange?.(next); };
+  const basePoints = series[0]?.points ?? [];
+  const axis = basePoints.length > 1 ? [basePoints[0], basePoints[Math.floor((basePoints.length - 1) / 2)], basePoints.at(-1)!] : [];
+
+  return <figure className={`price-chart ${compact ? "chart-compact" : ""}`}>
+    <div className="chart-title"><span>{externalSeries ? "Rendimiento comparado" : "Precio histórico"} <small>{subtitle}</small></span><div>{ranges.map(([value, label]) => <button className={range === value ? "selected" : ""} onClick={() => updateRange(value)} type="button" key={value}>{label}</button>)}</div></div>
+    {externalSeries ? <div className="chart-legend">{externalSeries.map((item) => <span className={item.comparison ? "comparison" : ""} key={item.label}><i />{item.label}</span>)}</div> : null}
+    {!externalSeries && status === "loading" ? <div className="chart-state" role="status">Cargando precios reales…</div> : null}
+    {!externalSeries && status === "error" ? <div className="chart-state negative" role="alert">No pudimos obtener el histórico real.</div> : null}
+    {!geometry && (externalSeries || status === "empty") ? <div className="chart-state">No hay suficientes cotizaciones para este rango.</div> : null}
+    {geometry ? <><svg viewBox={`0 0 760 ${compact ? 190 : 280}`} preserveAspectRatio="none" role="img" aria-label={`${series.map((item) => item.label).join(" versus ")}, rango ${range}`}>
+      {[0, 1, 2, 3, 4].map((line) => <line className="chart-guide" key={line} x1="0" x2="760" y1={20 + line * (geometry.height / 4)} y2={20 + line * (geometry.height / 4)} />)}
+      {geometry.paths.map((item) => <path key={item.label} className={item.comparison ? "chart-line chart-line-comparison" : "chart-line"} d={item.path} />)}
+    </svg><div className="chart-axis" aria-hidden="true">{axis.map((point) => <span key={point.date}>{new Intl.DateTimeFormat("es-AR", { month: "short", year: "2-digit", timeZone: "UTC" }).format(new Date(`${point.date}T00:00:00Z`))}</span>)}</div></> : null}
+  </figure>;
 }
