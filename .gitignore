@@ -1,0 +1,31 @@
+# .NET build output
+**/bin/
+**/obj/
+
+# IDE and OS state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+**/appsettings.*.Local.json
+**/secrets.json
+*.pfx
+*.pem
+*.key
+
+# Frontend build output (future)
+**/node_modules/
+**/dist/
+**/.next/
+**/*.tsbuildinfo
+
+# Test artifacts
+TestResults/
+coverage/
