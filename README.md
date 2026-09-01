@@ -10,8 +10,7 @@ Backend foundation for **spread**, an educational stock fundamental analyzer. It
 - `GET /api/companies/{ticker}` with validation, rate limiting, and 24-hour cache.
 - `GET /api/companies/{ticker}/financials` with five annual periods, strict normalization, and 12-hour cache.
 - `GET /api/companies/{ticker}/activity` with optional company-specific Alpha Vantage insider history, FMP fallback, and dividend history.
-- Pure 0–100 scoring primitives for six dimensions.blic
-
+- Pure 0–100 scoring primitives for six dimensions.blicblic
 - Missing-dimension weight redistribution and confidence gating.
 - Provider and immutable score-run persistence boundaries.
 - Architecture for future PostgreSQL, identity, profiles, watchlists, and portfolios.
@@ -42,9 +41,6 @@ npm run dev
 ```
 
 Then open https://spread-pablosnt07-4v56bl3as-pablosantamariaxd-8385s-projects.vercel.app/. Company identity, annual income, dividends, and insider evidence use normalized FMP data; price history and the remaining unfinished analysis slices still use demonstration data.
-
-Real provider keys must never be committed. Development uses the user-secret keys `FinancialData:Fmp:ApiKey` and `FinancialData:AlphaVantage:ApiKey`; hosting uses their double-underscore environment-variable equivalents. `.env.example` contains names only.
-
 ## Repository map
 
 - `Backend/Spread.Api`: API, domain, scoring, providers, and persistence boundaries.
